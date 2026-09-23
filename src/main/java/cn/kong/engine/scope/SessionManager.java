@@ -14,7 +14,10 @@ import cn.kong.engine.window.ContextWindow;
  * 会话管理器：缓存会话、从账本+快照重建、并发互斥的第一道闸。
  * 恢复 = 账本重放重建窗口 + 快照恢复待办与累计状态。
  *
- * <p>淘汰策略（TTL 清理）P1 补充；P0 会话常驻缓存。
+ * <p>淘汰（{@link #evict}）：外部删除会话或回收内存时调用，仅清缓存不动磁盘；
+ * 再次 acquire 将从持久层重建。运行中的会话拒绝淘汰。
+ *
+ * <p>淘汰策略（TTL 清理）P1 补充；P0 会话常驻缓存、显式淘汰兜底。
  */
 public final class SessionManager {
 
@@ -38,6 +41,25 @@ public final class SessionManager {
 
     public Session peek(String sessionId) {
         return cache.get(sessionId);
+    }
+
+    /**
+     * 淘汰会话缓存：空闲则移除并返回 true；缓存中不存在视为成功（幂等）；
+     * 运行中（RUNNING/STOPPING）返回 false。
+     *
+     * <p>仅清内存，不触碰持久层——磁盘投影的清理由外部（登记属主）负责。
+     */
+    public boolean evict(String sessionId) {
+        Session session = cache.get(sessionId);
+        if (session == null) {
+            return true;
+        }
+        if (!session.evictIfIdle()) {
+            return false;
+        }
+        // 条件移除：只移除刚淘汰的实例，避免与并发 acquire 装载的新实例冲突
+        cache.remove(sessionId, session);
+        return true;
     }
 
     private Session load(String id) {

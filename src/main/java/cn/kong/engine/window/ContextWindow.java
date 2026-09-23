@@ -17,8 +17,7 @@ import cn.kong.engine.port.context.TokenEstimator;
  * 上下文窗口：会话历史的内存结构。
  *
  * <p>核心不变量（配对完整性）：每个 assistant.toolCall 必有配对的 TOOL_RESULT 块，
- * 孤儿结果被丢弃。toMessages() 出口做配对修复，保证发给模型的消息序列合法——
- * 这是循环正确性的一部分，属于内核而非策略。
+ * 孤儿结果被丢弃。toMessages() 出口做配对修复，保证发给模型的消息序列合法
  */
 public final class ContextWindow {
 
@@ -39,8 +38,8 @@ public final class ContextWindow {
         blocks.add(Block.assistant(text, thinking, toolCalls));
     }
 
-    public void addToolResult(String toolCallId, String toolName, String text) {
-        blocks.add(Block.toolResult(toolCallId, toolName, text));
+    public void addToolResult(String toolCallId, String toolName, String text, String toolView) {
+        blocks.add(Block.toolResult(toolCallId, toolName, text, toolView));
     }
 
     /** 账本重放：由历史消息重建窗口（SYSTEM 头尾段不进窗口）。 */
@@ -48,7 +47,7 @@ public final class ContextWindow {
         switch (msg.role()) {
             case USER -> addUser(msg.text());
             case ASSISTANT -> addAssistant(msg.text(), msg.thinking(), msg.toolCalls());
-            case TOOL -> addToolResult(msg.toolCallId(), msg.toolName(), msg.text());
+            case TOOL -> addToolResult(msg.toolCallId(), msg.toolName(), msg.text(), msg.toolView());
             default -> { /* SYSTEM 忽略 */ }
         }
     }
@@ -70,10 +69,67 @@ public final class ContextWindow {
             switch (b.kind()) {
                 case USER -> raw.add(ChatMsg.user(b.text()));
                 case ASSISTANT -> raw.add(ChatMsg.assistant(b.text(), b.thinking(), b.toolCalls()));
-                case TOOL_RESULT -> raw.add(ChatMsg.toolResult(b.toolCallId(), b.toolName(), b.text()));
+                case TOOL_RESULT -> raw.add(ChatMsg.toolResult(b.toolCallId(), b.toolName(), b.text(), b.toolView()));
             }
         }
         return repairPairing(raw);
+    }
+
+    // ---- 压缩操作（压缩策略/钩子调用；普通轮次不触碰） ----
+
+    /**
+     * SNIP：截断旧工具结果文本（保留头尾），尾部 keepTailBlocks 块不动。
+     * 返回释放的粗估 token。
+     */
+    public long snipOldToolResults(int keepTailBlocks, int keepHeadChars, int keepTailChars) {
+        long freed = 0;
+        int from = Math.max(0, blocks.size() - Math.max(1, keepTailBlocks));
+        for (int i = 0; i < from; i++) {
+            Block b = blocks.get(i);
+            String text = b.text();
+            if (b.kind() == BlockKind.TOOL_RESULT
+                    && text != null && text.length() > keepHeadChars + keepTailChars + 32) {
+                String snipped = text.substring(0, keepHeadChars)
+                        + "\n…（中间内容已截断）…\n"
+                        + text.substring(text.length() - keepTailChars);
+                freed += estimator.estimate(text) - estimator.estimate(snipped);
+                // toolView 是 UI 元数据，不随正文截断
+                blocks.set(i, Block.toolResult(b.toolCallId(), b.toolName(), snipped, b.toolView()));
+            }
+        }
+        return freed;
+    }
+
+    /**
+     * PRUNE/SUMMARIZE：仅保留最近 keepTailBlocks 块，更早历史整体移除。
+     * 配对完整性由 toMessages() 的修复出口兜底（孤儿结果自动丢弃）。
+     * 返回移除的粗估 token。
+     */
+    public long clearBefore(int keepTailBlocks) {
+        int remove = Math.max(0, blocks.size() - Math.max(1, keepTailBlocks));
+        if (remove == 0) {
+            return 0;
+        }
+        long freed = 0;
+        for (int i = 0; i < remove; i++) {
+            freed += estimator.estimate(roughText(blocks.get(i)));
+        }
+        blocks.subList(0, remove).clear();
+        return freed;
+    }
+
+    private String roughText(Block b) {
+        StringBuilder sb = new StringBuilder();
+        if (b.text() != null) {
+            sb.append(b.text());
+        }
+        if (b.thinking() != null) {
+            sb.append(b.thinking());
+        }
+        for (ToolCall c : b.toolCalls()) {
+            sb.append(c.name()).append(c.argumentsJson());
+        }
+        return sb.toString();
     }
 
     /** 指标：token 用量与块分布（供压缩策略）。 */
@@ -131,7 +187,7 @@ public final class ContextWindow {
             if (m.role() == Role.ASSISTANT) {
                 for (ToolCall c : m.toolCalls()) {
                     if (!answered.contains(c.id())) {
-                        out.add(ChatMsg.toolResult(c.id(), c.name(), "[已中断：该调用没有执行结果]"));
+                        out.add(ChatMsg.toolResult(c.id(), c.name(), "[工具执行结果缺失]", null));
                     }
                 }
             }

@@ -38,6 +38,8 @@ public sealed interface EngineEvent permits
 
     // ---- 会话层 ----
 
+    String sessionId();
+
     record SessionStarted(String sessionId, boolean resumed) implements EngineEvent {
     }
 

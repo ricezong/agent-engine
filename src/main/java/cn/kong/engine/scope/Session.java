@@ -10,6 +10,10 @@ import cn.kong.engine.window.ContextWindow;
  * <p>并发约定：状态迁移全部 CAS，同一会话同一时刻至多一个 RUNNING——
  * 并发正确性由内核保证，不依赖外部模块自觉。
  * 中断是"标记 + 状态迁移"：循环在检查点观察标志并优雅停止。
+ *
+ * <p>CLOSED 是淘汰终态：仅可从 IDLE 迁入（{@link #evictIfIdle()}），
+ * 表示该实例已从会话缓存移除；此后 tryAcquire 必然失败，实例不可复用。
+ * 淘汰是内存操作，会话的持久化投影（账本/快照）不受影响——再次 acquire 将从磁盘重建。
  */
 public final class Session {
 
@@ -53,6 +57,18 @@ public final class Session {
 
     public boolean isInterruptRequested() {
         return interruptRequested;
+    }
+
+    // ---- 淘汰 ----
+
+    /**
+     * 空闲时淘汰：CAS IDLE→CLOSED。
+     *
+     * <p>与 tryAcquire 在同一状态位上互斥，保证"淘汰成功则该实例永不再运行"。
+     * 运行中（RUNNING/STOPPING）返回 false，调用方应放弃或稍后重试。
+     */
+    public boolean evictIfIdle() {
+        return status.compareAndSet(SessionStatus.IDLE, SessionStatus.CLOSED);
     }
 
     // ---- 视图 ----

@@ -138,6 +138,12 @@ public final class TurnLoop {
 
                 // ---- 正常退出条件：模型不再要工具 ----
                 if (!reply.wantsTools()) {
+                    if (reply.truncated() && turnInRun + 1 < config.maxTurns()) {
+                        // 输出被截断（finishReason=length）：计入轮次后续写而非退出；
+                        // 续写提示由应用层 PostModel 钩子以 Nudge 注入（内核只提供机制）
+                        turnInRun++;
+                        continue;
+                    }
                     return finish(session, StopCategory.COMPLETED, "正常完成");
                 }
 
@@ -161,10 +167,9 @@ public final class TurnLoop {
                 long baseSeq = deps.ledger().size(session.id());
                 for (int i = 0; i < results.size(); i++) {
                     ToolResult r = results.get(i);
-                    String stored = spillIfHuge(r, baseSeq + i + 1);
-                    ChatMsg msg = ChatMsg.toolResult(r.toolCallId(), r.toolName(), stored);
-                    deps.ledger().append(session.id(), msg);
-                    session.window().addToolResult(r.toolCallId(), r.toolName(), stored);
+                    String stored = spillIfHuge(session.id(), r, baseSeq + i + 1);
+                    deps.ledger().append(session.id(), ChatMsg.toolResult(r.toolCallId(), r.toolName(), stored, r.toolView()));
+                    session.window().addToolResult(r.toolCallId(), r.toolName(), stored, r.toolView());
                 }
 
                 turnInRun++;
@@ -288,12 +293,12 @@ public final class TurnLoop {
     // ---- 溢出关卡 ----
 
     /** 超大工具结果落工件，窗口只留头尾 + 引用（上下文不被大结果淹没）。 */
-    private String spillIfHuge(ToolResult r, long seq) {
+    private String spillIfHuge(String sessionId, ToolResult r, long seq) {
         String output = r.output() == null ? "" : r.output();
         if (output.length() <= config.spillThresholdChars()) {
             return output;
         }
-        ArtifactRef ref = deps.artifacts().spill(r.toolName(), output, seq);
+        ArtifactRef ref = deps.artifacts().spill(sessionId, r.toolName(), output, seq);
         String head = output.substring(0, Math.min(config.spillKeepHeadChars(), output.length()));
         String tail = output.length() <= config.spillKeepTailChars()
                 ? ""

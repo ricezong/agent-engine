@@ -34,12 +34,14 @@ import cn.kong.engine.stop.StopCategory;
 /**
  * 引擎门面——唯一的对外入口。
  *
- * <p>命令：run / interrupt / answer / close（会改变引擎状态）
+ * <p>命令：run / interrupt / answer / evict / close（会改变引擎状态）
  * 事件：subscribe（只读流，传输层从这里接线）
  *
  * <p>装配：Builder 显式注入全部端口，build() 校验完整性。引擎不自带任何端口实现
  */
 public final class AgentEngine implements AutoCloseable {
+
+    private static final System.Logger LOG = System.getLogger(AgentEngine.class.getName());
 
     private final EngineConfig config;
     private final EventPublisher events = new EventPublisher();
@@ -110,8 +112,19 @@ public final class AgentEngine implements AutoCloseable {
     }
 
     /** 回答引擎提问（异步交互通道用；同步通道返回 false）。 */
-    public boolean answer(String sessionId, String questionId, String text) {
-        return interaction.deliverAnswer(questionId, text);
+    public boolean answer(String sessionId, String questionId, List<InteractionChannel.Answer> answers) {
+        return interaction.deliverAnswer(questionId, answers);
+    }
+
+    /**
+     * 淘汰会话缓存（内存回收/删除前置）。
+     */
+    public boolean evict(String sessionId) {
+        boolean evicted = sessions.evict(sessionId);
+        if (evicted) {
+            LOG.log(System.Logger.Level.INFO, "[Engine] 会话缓存已淘汰: {0}", sessionId);
+        }
+        return evicted;
     }
 
     /** 订阅事件流（只读）。 */
