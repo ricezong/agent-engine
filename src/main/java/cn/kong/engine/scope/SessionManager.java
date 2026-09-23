@@ -9,6 +9,8 @@ import cn.kong.engine.port.store.SnapshotPort;
 import cn.kong.engine.port.store.SnapshotPort.SessionSnapshot;
 import cn.kong.engine.port.context.TokenEstimator;
 import cn.kong.engine.window.ContextWindow;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 会话管理器：缓存会话、从账本+快照重建、并发互斥的第一道闸。
@@ -18,6 +20,8 @@ import cn.kong.engine.window.ContextWindow;
  * 再次 acquire 将从持久层重建。运行中的会话拒绝淘汰。
  */
 public final class SessionManager {
+
+    private static final Logger log = LoggerFactory.getLogger(SessionManager.class);
 
     private final ConcurrentHashMap<String, Session> cache = new ConcurrentHashMap<>();
     private final LedgerPort ledger;
@@ -68,6 +72,7 @@ public final class SessionManager {
             session.state().restore(s);
             session.todos().restore(s.todos());
         });
+        log.info("[Session] 从持久层重建 session={}, blocks={}, 有快照={}", id, session.window().size(), snap.isPresent());
         return session;
     }
 }

@@ -31,6 +31,8 @@ import cn.kong.engine.scope.Session;
 import cn.kong.engine.scope.SessionManager;
 import cn.kong.engine.scope.SessionStatus;
 import cn.kong.engine.stop.StopCategory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 引擎门面——唯一的对外入口。
@@ -42,7 +44,7 @@ import cn.kong.engine.stop.StopCategory;
  */
 public final class AgentEngine implements AutoCloseable {
 
-    private static final System.Logger LOG = System.getLogger(AgentEngine.class.getName());
+    private static final Logger log = LoggerFactory.getLogger(AgentEngine.class);
 
     private final EngineConfig config;
     private final EventPublisher events = new EventPublisher();
@@ -86,6 +88,7 @@ public final class AgentEngine implements AutoCloseable {
         Session session = sessions.acquire(sessionId);
         boolean resumed = session.window().size() > 0;
         if (!session.tryAcquire()) {
+            log.warn("[Engine] 拒绝并发运行 session={}", sessionId);
             return RunHandle.completed(new RunResult(
                     StopCategory.REJECTED_BUSY, "会话正在运行中", session.state().totalUsage()));
         }
@@ -108,6 +111,7 @@ public final class AgentEngine implements AutoCloseable {
         if (session == null) {
             return false;
         }
+        log.info("[Engine] 请求中断 session={}, 当前状态={}", sessionId, session.status());
         session.requestInterrupt();
         return true;
     }
@@ -123,7 +127,7 @@ public final class AgentEngine implements AutoCloseable {
     public boolean evict(String sessionId) {
         boolean evicted = sessions.evict(sessionId);
         if (evicted) {
-            LOG.log(System.Logger.Level.INFO, "[Engine] 会话缓存已淘汰: {0}", sessionId);
+            log.info("[Engine] 会话缓存已淘汰: {}", sessionId);
         }
         return evicted;
     }
@@ -147,7 +151,7 @@ public final class AgentEngine implements AutoCloseable {
         try {
             if (!runPool.awaitTermination(
                     config.toolTimeout().plusSeconds(30).toMillis(), TimeUnit.MILLISECONDS)) {
-                LOG.log(System.Logger.Level.WARNING, "[Engine] 优雅关闭超时，仍有在途 run");
+                log.warn("[Engine] 优雅关闭超时，仍有在途 run");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

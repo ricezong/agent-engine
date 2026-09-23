@@ -10,6 +10,8 @@ import cn.kong.engine.event.EngineEvent;
 import cn.kong.engine.event.EventPublisher;
 import cn.kong.engine.hook.HookChain;
 import cn.kong.engine.hook.HookChain.HookOutcome;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import cn.kong.engine.msg.ChatMsg;
 import cn.kong.engine.msg.ToolCall;
 import cn.kong.engine.msg.ToolResult;
@@ -47,7 +49,7 @@ import cn.kong.engine.port.tool.ToolContext;
  */
 public final class TurnLoop {
 
-    private static final System.Logger LOG = System.getLogger(TurnLoop.class.getName());
+    private static final Logger log = LoggerFactory.getLogger(TurnLoop.class);
 
     /** 依赖聚合：由 AgentEngine 装配后注入。 */
     public record Deps(
@@ -83,6 +85,7 @@ public final class TurnLoop {
         // 步数上限按"单次 run"计：会话累计轮次由 SessionState 单独统计并随快照持久化
         int turnInRun = 0;
         try {
+            log.info("[Run] 开始 session={}, inputChars={}", session.id(), userInput.length());
             // 用户输入：事件 → 账本 → 窗口
             deps.events().publish(new EngineEvent.UserMessage(session.id(), userInput));
             deps.ledger().append(session.id(), ChatMsg.user(userInput));
@@ -99,6 +102,7 @@ public final class TurnLoop {
                 int turnNo = turnInRun + 1;
                 session.state().turnStarted();
                 deps.events().publish(new EngineEvent.TurnStarted(session.id(), turnNo));
+                log.debug("[Run] 轮次开始 session={}, turn={}", session.id(), turnNo);
 
                 // ---- 模型前：钩子（预算/压缩/…） ----
                 HookOutcome pre = deps.hooks().runPreModel(turn);
@@ -117,7 +121,11 @@ public final class TurnLoop {
                 turn.nudges().clear(); // 提醒已消费
 
                 // ---- 模型 ----
+                long modelStart = System.currentTimeMillis();
                 LlmReply reply = callModel(session.id(), request);
+                log.debug("[Run] 模型返回 session={}, turn={}, costMs={}, toolCalls={}, finishReason={}",
+                        session.id(), turnNo, System.currentTimeMillis() - modelStart,
+                        reply.toolCalls().size(), reply.finishReason());
                 turn.setReply(reply);
                 session.state().addUsage(reply.usage());
                 deps.events().publish(new EngineEvent.UsageReported(session.id(), reply.usage()));
@@ -173,8 +181,10 @@ public final class TurnLoop {
                 turnInRun++;
             }
         } catch (LlmPortException e) {
+            log.error("[Run] 模型调用失败 session={}: {}", session.id(), e.getMessage(), e);
             return finish(session, StopCategory.INTERNAL_ERROR, "模型调用失败: " + e.getMessage());
         } catch (Exception e) {
+            log.error("[Run] 内部错误 session={}", session.id(), e);
             return finish(session, StopCategory.INTERNAL_ERROR, "内部错误: " + e);
         }
     }
@@ -185,9 +195,9 @@ public final class TurnLoop {
         Session session = turn.session();
         return new AssemblyParts(
                 config.systemPrompt(),
-                safeRender(() -> deps.memory().render(turn.task().input(), config.memoryRenderMaxChars())),
+                safeRender(session.id(), () -> deps.memory().render(turn.task().input(), config.memoryRenderMaxChars())),
                 session.state().compression().lastSummary(),
-                safeRender(() -> deps.environment().probe(session.id())),
+                safeRender(session.id(), () -> deps.environment().probe(session.id())),
                 session.todos().render(),
                 List.copyOf(turn.nudges()),
                 session.window(),
@@ -195,11 +205,11 @@ public final class TurnLoop {
     }
 
     /** 记忆/环境渲染失败不阻断循环（可观测性降级而非执行失败）。 */
-    private String safeRender(java.util.function.Supplier<String> supplier) {
+    private String safeRender(String sessionId, java.util.function.Supplier<String> supplier) {
         try {
             return supplier.get();
         } catch (Exception e) {
-            LOG.log(System.Logger.Level.WARNING, "上下文零件渲染失败: " + e, e);
+            log.warn("[Run] 上下文零件渲染失败 session={}", sessionId, e);
             return null;
         }
     }
@@ -259,9 +269,13 @@ public final class TurnLoop {
         List<Callable<ToolResult>> jobs = new ArrayList<>(calls.size());
         for (ToolCall call : calls) {
             jobs.add(() -> {
+                long start = System.currentTimeMillis();
+                log.debug("[Tool] 开始 session={}, tool={}, callId={}", session.id(), call.name(), call.id());
                 deps.events().publish(new EngineEvent.ToolExecutionStarted(session.id(), call.id(), call.name()));
                 ToolResult result = executeWithGate(session, call, ctx);
                 deps.events().publish(new EngineEvent.ToolExecutionFinished(session.id(), result));
+                log.debug("[Tool] 结束 session={}, tool={}, callId={}, success={}, costMs={}",
+                        session.id(), call.name(), call.id(), result.success(), System.currentTimeMillis() - start);
                 return result;
             });
         }
@@ -286,6 +300,8 @@ public final class TurnLoop {
                 out.add(f.get(config.toolTimeout().toMillis(), TimeUnit.MILLISECONDS));
             } catch (TimeoutException e) {
                 f.cancel(true);
+                log.warn("[Tool] 超时取消 session={}, tool={}, callId={}, 上限={}s",
+                        session.id(), call.name(), call.id(), config.toolTimeout().toSeconds());
                 out.add(ToolResult.failure(call,
                         "工具执行超时（上限 " + config.toolTimeout().toSeconds() + " 秒），已取消"));
             } catch (InterruptedException e) {
@@ -306,6 +322,7 @@ public final class TurnLoop {
             var spec = deps.tools().find(call.name()).map(t -> t.spec()).orElse(null);
             Decision decision = deps.interaction().gate(call, spec);
             if (decision == Decision.REJECTED) {
+                log.warn("[Tool] 门禁拒绝 session={}, tool={}, callId={}", session.id(), call.name(), call.id());
                 return ToolResult.failure(call, "门禁拒绝：破坏性操作未获批准");
             }
         }
@@ -321,6 +338,8 @@ public final class TurnLoop {
             return output;
         }
         ArtifactRef ref = deps.artifacts().spill(sessionId, r.toolName(), output, seq);
+        log.info("[Spill] 工具结果溢出落盘 session={}, tool={}, chars={}, ref={}",
+                sessionId, r.toolName(), output.length(), ref.refId());
         String head = output.substring(0, Math.min(config.spillKeepHeadChars(), output.length()));
         String tail = output.length() <= config.spillKeepTailChars()
                 ? ""
@@ -334,6 +353,9 @@ public final class TurnLoop {
 
     private RunResult finish(Session session, StopCategory category, String message) {
         RunResult result = new RunResult(category, message, session.state().totalUsage());
+        log.info("[Run] 结束 session={}, category={}, turns={}, totalTokens={}, detail={}",
+                session.id(), category, session.state().turnCount(),
+                session.state().totalUsage().total(), message);
         deps.events().publish(new EngineEvent.RunFinished(
                 session.id(), category, message, session.state().totalUsage()));
         try {
@@ -345,7 +367,7 @@ public final class TurnLoop {
                     session.state().turnCount(),
                     Instant.now()));
         } catch (Exception e) {
-            LOG.log(System.Logger.Level.WARNING, "快照保存失败: " + e, e);
+            log.warn("[Run] 快照保存失败 session={}", session.id(), e);
         }
         return result;
     }
