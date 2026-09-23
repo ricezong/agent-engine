@@ -1,5 +1,7 @@
 package cn.kong.engine;
 
+import java.time.Duration;
+
 /**
  * 引擎配置（不可变，Builder 构建）。
  *
@@ -10,6 +12,7 @@ public final class EngineConfig {
     // ---- 循环 ----
     private final int maxTurns;                 // 单次 run 最大轮次（默认 30）
     private final int toolParallelism;          // 工具并行度（默认 4）
+    private final Duration toolTimeout;         // 单个工具执行上限（默认 30 秒）
     private final boolean autoApproveDestructive; // 破坏性工具免门禁（默认 false，生产勿开）
 
     // ---- 上下文 ----
@@ -21,16 +24,10 @@ public final class EngineConfig {
     private final int spillKeepTailChars;       // 溢出保留尾（默认 400）
     private final int memoryRenderMaxChars;     // 记忆渲染上限（默认 2_000）
 
-    // ---- 会话 ----
-    private final BusyPolicy busyPolicy;        // 会话忙时策略（P0 仅 REJECT，P1 实现 QUEUE）
-
-    public enum BusyPolicy {
-        REJECT, QUEUE
-    }
-
     private EngineConfig(Builder b) {
         this.maxTurns = b.maxTurns;
         this.toolParallelism = b.toolParallelism;
+        this.toolTimeout = b.toolTimeout;
         this.autoApproveDestructive = b.autoApproveDestructive;
         this.systemPrompt = b.systemPrompt;
         this.maxContextTokens = b.maxContextTokens;
@@ -39,7 +36,6 @@ public final class EngineConfig {
         this.spillKeepHeadChars = b.spillKeepHeadChars;
         this.spillKeepTailChars = b.spillKeepTailChars;
         this.memoryRenderMaxChars = b.memoryRenderMaxChars;
-        this.busyPolicy = b.busyPolicy;
     }
 
     public static EngineConfig defaults() {
@@ -56,6 +52,10 @@ public final class EngineConfig {
 
     public int toolParallelism() {
         return toolParallelism;
+    }
+
+    public Duration toolTimeout() {
+        return toolTimeout;
     }
 
     public boolean autoApproveDestructive() {
@@ -90,15 +90,12 @@ public final class EngineConfig {
         return memoryRenderMaxChars;
     }
 
-    public BusyPolicy busyPolicy() {
-        return busyPolicy;
-    }
-
     /** 显式构建器：所有默认值一眼可见。 */
     public static final class Builder {
 
         private int maxTurns = 30;
         private int toolParallelism = 4;
+        private Duration toolTimeout = Duration.ofSeconds(30);
         private boolean autoApproveDestructive = false;
         private String systemPrompt = "你是一个能调用工具的助手，按需使用工具完成任务。";
         private long maxContextTokens = 200_000;
@@ -107,7 +104,6 @@ public final class EngineConfig {
         private int spillKeepHeadChars = 600;
         private int spillKeepTailChars = 400;
         private int memoryRenderMaxChars = 2_000;
-        private BusyPolicy busyPolicy = BusyPolicy.REJECT;
 
         public Builder maxTurns(int v) {
             this.maxTurns = v;
@@ -116,6 +112,11 @@ public final class EngineConfig {
 
         public Builder toolParallelism(int v) {
             this.toolParallelism = v;
+            return this;
+        }
+
+        public Builder toolTimeout(Duration v) {
+            this.toolTimeout = v;
             return this;
         }
 
@@ -156,11 +157,6 @@ public final class EngineConfig {
 
         public Builder memoryRenderMaxChars(int v) {
             this.memoryRenderMaxChars = v;
-            return this;
-        }
-
-        public Builder busyPolicy(BusyPolicy v) {
-            this.busyPolicy = v;
             return this;
         }
 

@@ -16,8 +16,6 @@ import cn.kong.engine.window.ContextWindow;
  *
  * <p>淘汰（{@link #evict}）：外部删除会话或回收内存时调用，仅清缓存不动磁盘；
  * 再次 acquire 将从持久层重建。运行中的会话拒绝淘汰。
- *
- * <p>淘汰策略（TTL 清理）P1 补充；P0 会话常驻缓存、显式淘汰兜底。
  */
 public final class SessionManager {
 

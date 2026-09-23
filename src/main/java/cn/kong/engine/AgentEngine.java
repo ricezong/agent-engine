@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import cn.kong.engine.event.EngineEvent;
@@ -79,7 +80,7 @@ public final class AgentEngine implements AutoCloseable {
     // ---- 命令 ----
 
     /**
-     * 发起一次运行。同一会话忙时按 busyPolicy 处理。
+     * 发起一次运行。同一会话同一时刻至多一个 RUNNING，忙时返回 REJECTED_BUSY。
      */
     public RunHandle run(String sessionId, String userInput) {
         Session session = sessions.acquire(sessionId);
@@ -88,7 +89,7 @@ public final class AgentEngine implements AutoCloseable {
             return RunHandle.completed(new RunResult(
                     StopCategory.REJECTED_BUSY, "会话正在运行中", session.state().totalUsage()));
         }
-        events.publish(new EngineEvent.SessionStarted(sessionId, resumed));
+        events.publish(new EngineEvent.RunStarted(sessionId, resumed));
         events.publish(new EngineEvent.SessionStatusChanged(sessionId, SessionStatus.RUNNING));
         Future<RunResult> future = runPool.submit(() -> {
             try {
@@ -132,6 +133,29 @@ public final class AgentEngine implements AutoCloseable {
         events.subscribe(sink);
     }
 
+    /** 退订事件流 */
+    public void unsubscribe(EventSink sink) {
+        events.unsubscribe(sink);
+    }
+
+    /**
+     * 优雅关闭：拒绝新 run，等待在途 run 结束（上限 = 工具超时 + 30 秒）。
+     * 每个 run 的终态已由 RunFinished 事件覆盖（事件模型是会话级的，不设引擎级终态事件）。
+     */
+    public void shutdown() {
+        runPool.shutdown();
+        try {
+            if (!runPool.awaitTermination(
+                    config.toolTimeout().plusSeconds(30).toMillis(), TimeUnit.MILLISECONDS)) {
+                LOG.log(System.Logger.Level.WARNING, "[Engine] 优雅关闭超时，仍有在途 run");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        toolPool.shutdown();
+    }
+
+    /** 立即关闭：中断在途线程（在途 run 以 INTERNAL_ERROR 收尾并照常发 RunFinished）。 */
     @Override
     public void close() {
         runPool.shutdownNow();

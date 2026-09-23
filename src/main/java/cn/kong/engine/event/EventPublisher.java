@@ -17,6 +17,11 @@ public final class EventPublisher {
         sinks.add(sink);
     }
 
+    /** 退订 */
+    public void unsubscribe(EventSink sink) {
+        sinks.remove(sink);
+    }
+
     public void publish(EngineEvent event) {
         for (EventSink sink : sinks) {
             try {

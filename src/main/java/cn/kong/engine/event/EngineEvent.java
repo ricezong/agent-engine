@@ -19,7 +19,7 @@ import cn.kong.engine.stop.StopCategory;
  * <p>分组：会话层 / 轮次层 / 模型层 / 工具层 / 交互层 / 治理层 / 收尾。
  */
 public sealed interface EngineEvent permits
-        EngineEvent.SessionStarted,
+        EngineEvent.RunStarted,
         EngineEvent.SessionStatusChanged,
         EngineEvent.UserMessage,
         EngineEvent.TurnStarted,
@@ -40,7 +40,7 @@ public sealed interface EngineEvent permits
 
     String sessionId();
 
-    record SessionStarted(String sessionId, boolean resumed) implements EngineEvent {
+    record RunStarted(String sessionId, boolean resumed) implements EngineEvent {
     }
 
     record SessionStatusChanged(String sessionId, SessionStatus status) implements EngineEvent {

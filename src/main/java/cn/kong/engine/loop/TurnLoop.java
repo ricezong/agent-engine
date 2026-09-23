@@ -3,9 +3,7 @@ package cn.kong.engine.loop;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
+import java.util.concurrent.*;
 
 import cn.kong.engine.EngineConfig;
 import cn.kong.engine.event.EngineEvent;
@@ -139,8 +137,8 @@ public final class TurnLoop {
                 // ---- 正常退出条件：模型不再要工具 ----
                 if (!reply.wantsTools()) {
                     if (reply.truncated() && turnInRun + 1 < config.maxTurns()) {
-                        // 输出被截断（finishReason=length）：计入轮次后续写而非退出；
-                        // 续写提示由应用层 PostModel 钩子以 Nudge 注入（内核只提供机制）
+                        // 输出被截断（finishReason=length）：计入轮次后续写而非退出。
+                        turn.nudges().add("上一条回复因输出长度上限被截断，请从中断处继续输出，不要重复已输出的内容。");
                         turnInRun++;
                         continue;
                     }
@@ -248,6 +246,11 @@ public final class TurnLoop {
 
     // ---- 工具执行 ----
 
+    /**
+     * 工具执行（并行，事件全程可观测）。
+     * 每个工具独立享有 toolTimeout 上限：超时转 failure 并 cancel，不中断循环。
+     * 中断仍是检查点语义（轮首/组装前/工具前），不在等待期间抢占。
+     */
     private List<ToolResult> executeTools(Session session, List<ToolCall> calls, int turnNo) {
         ToolContext ctx = new ToolContext(
                 session.id(), turnNo, deps.workspace(), deps.artifacts(),
@@ -262,20 +265,39 @@ public final class TurnLoop {
                 return result;
             });
         }
+
+        List<Future<ToolResult>> futures = new ArrayList<>(calls.size());
         try {
-            List<Future<ToolResult>> futures = toolPool.invokeAll(jobs);
-            List<ToolResult> out = new ArrayList<>(futures.size());
-            for (Future<ToolResult> f : futures) {
-                out.add(f.get());
+            for (Callable<ToolResult> job : jobs) {
+                futures.add(toolPool.submit(job));
             }
-            return out;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return calls.stream().map(c -> ToolResult.failure(c, "执行被中断")).toList();
-        } catch (java.util.concurrent.ExecutionException e) {
-            // invokeAll 的任务体已捕获工具异常，这里只可能出基础设施错误
-            return calls.stream().map(c -> ToolResult.failure(c, "执行基础设施错误: " + e.getCause())).toList();
+        } catch (RejectedExecutionException e) {
+            for (Future<ToolResult> f : futures) {
+                f.cancel(true);
+            }
+            return calls.stream().map(c -> ToolResult.failure(c, "工具线程池已关闭")).toList();
         }
+
+        List<ToolResult> out = new ArrayList<>(futures.size());
+        for (int i = 0; i < futures.size(); i++) {
+            Future<ToolResult> f = futures.get(i);
+            ToolCall call = calls.get(i);
+            try {
+                out.add(f.get(config.toolTimeout().toMillis(), TimeUnit.MILLISECONDS));
+            } catch (TimeoutException e) {
+                f.cancel(true);
+                out.add(ToolResult.failure(call,
+                        "工具执行超时（上限 " + config.toolTimeout().toSeconds() + " 秒），已取消"));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                f.cancel(true);
+                out.add(ToolResult.failure(call, "执行被中断"));
+            } catch (ExecutionException e) {
+                // 任务体已捕获工具异常，这里只可能是基础设施错误
+                out.add(ToolResult.failure(call, "执行基础设施错误: " + e.getCause()));
+            }
+        }
+        return out;
     }
 
     /** 破坏性工具走门禁；其余直接执行。 */
